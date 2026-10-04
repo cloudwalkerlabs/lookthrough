@@ -169,7 +169,8 @@ Later, put Open H.264 first.
 
 ## Test environment
 
-- **Server:** wayvnc on `xps9550`, port **5901**, no authentication.
+- **Server:** wayvnc on `xps9550`, which is the development machine itself:
+  connect to `127.0.0.1:5901`. No authentication.
   - Started by the user systemd unit `vncserver.service`, which runs
     `~/.local/bin/manage_wayvnc.py`. That script launches labwc + XFCE
     headless and `wayvnc --gpu -f 60 0.0.0.0 5901`.
