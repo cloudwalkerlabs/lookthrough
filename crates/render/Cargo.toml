@@ -1,0 +1,14 @@
+[package]
+name = "lookthrough-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lookthrough-core = { version = "0.1.0", path = "../core" }
+tracing = "0.1.44"
+# Matches iced 0.14, so the desktop app can share iced's device.
+wgpu = "27.0.1"
+
+[lints]
+workspace = true
