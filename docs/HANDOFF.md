@@ -12,8 +12,21 @@ VNC server compatibility is a non-goal.
 ## Current state (2026-10-04)
 
 - The repo is an empty Cargo binary crate: `lookthrough`, edition 2024,
-  hello-world `src/main.rs`. Nothing has been committed yet.
+  hello-world `src/main.rs`.
 - No code has been written. Only research is done.
+
+## Scope decisions (2026-10-04)
+
+- **HiDPI is supported.** The client asks the server for a framebuffer in
+  physical pixels, using SetDesktopSize, and draws it 1:1. The server's scale
+  is set on the compositor, not through RFB. See `research.md` §6.
+- **Android is desktop-mode only.** Hardware keyboard and mouse; no soft
+  keyboard and no IME/`InputConnection`. See `research.md` §8.
+- **No authentication and no TLS.** Security type None only. Use on a
+  trusted LAN or through a tunnel. See `research.md` §9.
+- **Latency comes before convenience in the Rust code.** The hot path is
+  synchronous on dedicated threads, with as few thread hops as possible.
+  Async is used only on the control plane. See `research.md` §7.
 
 ## Decided architecture
 
@@ -42,6 +55,22 @@ android/      Gradle project: Kotlin + Compose shell, SurfaceView, cargo-ndk
    recorded byte streams.
 6. **Request a 32-bit pixel format that matches the texture layout,** so
    decoded tiles need no conversion.
+7. **The hot path has no async runtime.** Hot path means socket read →
+   parse → decode → upload → present, plus input → socket write.
+   - One blocking reader thread per session.
+   - Decode workers only for parallel work (JPEG tiles, zlib streams).
+   - The UI thread writes input straight to the socket (cloned `TcpStream`
+     behind a mutex).
+   - Every extra thread hand-off must be justified by a measurement.
+8. **Low-latency transport and present settings.**
+   - `TCP_NODELAY`, with one `write` per client message.
+   - wgpu `PresentMode::Mailbox` when available, otherwise `Fifo` with
+     `desired_maximum_frame_latency = 1`.
+   - On Android, call `requestUnbufferedDispatch` on the session view.
+9. **HiDPI.**
+   - The framebuffer size is the view's physical pixel size.
+   - Pointer positions are converted from logical to physical coordinates.
+   - The texture and cursor are drawn 1:1 with nearest sampling.
 
 ### Protocol scope
 
@@ -59,9 +88,12 @@ Start with Tight first, then Raw, then ZRLE.
 | QEMU extended key event (-258) | Keyboard input. |
 | ExtendedClipboard | Clipboard sync. |
 | Extended mouse buttons (-316) | Extra mouse buttons. |
+| SetDesktopSize (client msg 251) | HiDPI and fit-to-window. Send only after the server's first ExtendedDesktopSize, and reuse its screen id. Debounce about 250 ms. |
+| Security type None (1) | The only security type supported. |
 
 - **Deferred:** Open H.264 (50).
 - **Not needed for wayvnc:** CopyRect, Hextile, RRE, TRLE, ZYWRLE.
+- **Out of scope:** VNC auth, VeNCrypt/TLS, RSA-AES.
 
 **SetEncodings order matters.** The server uses the first of
 Raw/Tight/ZRLE/Open H.264 it finds in the list. Send Tight before Raw/ZRLE.
@@ -69,7 +101,24 @@ Later, put Open H.264 first.
 
 ### Crate choices (starting points; benchmark before replacing)
 
-- **Async I/O:** tokio, or plain threads. The core should not depend on either.
+- **Errors:**
+  - Library crates (`core`, `render`, `ffi`) use `thiserror` enums. Protocol
+    errors carry the message type and byte offset.
+  - The binary crates (`desktop`, the headless test client) use `anyhow`.
+  - `ffi` maps errors to a uniffi error enum. Don't panic across FFI.
+- **Logging and tracing:** `tracing` + `tracing-subscriber`.
+  - On Android, use `tracing-android` or an `android_logger` bridge.
+  - Put spans on the per-update pipeline stages, so latency can be measured
+    from the start.
+- **Threads and channels:** `std::thread` + `crossbeam-channel` on the hot
+  path.
+  - Decode workers are a small fixed pool: 4 zlib-stream workers plus JPEG
+    workers. They are either `rayon` or hand-rolled; pick by measurement.
+- **Async (control plane only):**
+  - Desktop: whatever Iced's executor provides (tokio feature), for
+    subscriptions and connect/reconnect.
+  - Android: uniffi async exports for the Kotlin API.
+  - `core` and `render` must not depend on any runtime.
 - **zlib:** `flate2` with the `zlib-rs` backend (pure Rust, cross-compiles to
   Android).
 - **JPEG:** `zune-jpeg` (pure Rust, SIMD). The alternative is `turbojpeg`
@@ -81,16 +130,22 @@ Later, put Open H.264 first.
 ## Milestones
 
 1. **Core + headless test client.**
-   - Connect to the test server; handshake with no auth.
+   - Connect to the test server; handshake with security type None.
    - Send SetEncodings, then receive and decode Tight with JPEG.
    - Write a frame to a PNG for checking.
    - Unit tests on recorded byte streams.
 2. **Render crate + desktop shell (Iced).**
    - Live view, input, local cursor, ContinuousUpdates/Fence.
+   - HiDPI: SetDesktopSize to the physical window size, 1:1 drawing,
+     debounced resize.
    - Measure decode time per update and latency from input to screen.
 3. **Android shell.**
    - Compose UI, `SurfaceView` → Rust wgpu surface.
-   - Keyboard via `InputConnection`, mapped to keysyms; touch mapped to mouse.
+   - Hardware keyboard via `KeyEvent` → keysym + QEMU scancode (evdev→qnum).
+   - Mouse via hover/motion events, buttons, scroll axes. Hide the system
+     pointer.
+   - `requestUnbufferedDispatch`.
+   - No soft keyboard and no touch-to-mouse mapping.
    - Recover from surface loss when the app is backgrounded.
 4. **Tuning.** Adapt JPEG quality to measured throughput; profile on a real
    phone.
@@ -115,14 +170,24 @@ Later, put Open H.264 first.
     `WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128` (the Intel GPU).
   - Then restart the service. The Intel VA-API driver is already installed
     and verified with `vainfo`.
+- **HiDPI on the server:**
+  - The output scale must be set once on the compositor, for example
+    `wlr-randr --output HEADLESS-1 --scale 2` in the startup script.
+    wayvnc's resize keeps it.
+  - Changing it means editing the user's scripts, so ask first.
 - **Reference sources** for protocol details: Neat VNC
-  (`src/server.c`, `src/enc/tight.c`), wlvncc.
+  (`src/server.c`, `src/enc/tight.c`), wayvnc (`src/main.c`
+  `on_client_resize`), wlvncc.
 
 ## Open questions
 
-- **Authentication.** Not researched. The test server has none. wayvnc
-  supports TLS/VeNCrypt and RSA-AES; decide what to support before any use
-  outside the LAN.
 - **JPEG decoding speed on the target phone:** `zune-jpeg` vs `turbojpeg`.
 - **wgpu backend on Android:** Vulkan vs GLES, and the minimum Android
-  version to support.
+  version to support. Also check whether Mailbox present mode is available.
+- **Thread wake-up cost on the target phone.** Repeat the `research.md` §7
+  benchmark on the device.
+- **Android system shortcuts** in desktop mode: find out which key combos
+  (Meta, Alt+Tab) reach the app.
+- **Server scale vs client scale.** RFB can't carry the scale. Decide whether
+  a mismatch only needs documenting, or whether a helper should set it (for
+  example over SSH).

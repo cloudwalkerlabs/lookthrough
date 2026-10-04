@@ -136,8 +136,10 @@ and **native Android UI (Kotlin + Jetpack Compose)**.
 
 ### Android integration
 
-- Kotlin owns the UI, keyboard input (a real `InputConnection`), gestures and
-  app lifecycle.
+- Kotlin owns the UI, input events and app lifecycle.
+- **Input is desktop-mode only** (decided 2026-10-04): a physical keyboard
+  and mouse, typically with an external display. There is no soft keyboard,
+  so no `InputConnection`/IME work. See §8.
 - Rust owns networking, decoding and rendering.
 - **Control API:** uniffi-generated Kotlin bindings. These support callback
   interfaces and async. Callbacks arrive on Rust threads, so Kotlin must post
@@ -155,7 +157,7 @@ and **native Android UI (Kotlin + Jetpack Compose)**.
 
 | Option | Reason |
 |---|---|
-| egui / eframe on Android | Android keyboard/IME support through winit and android-activity is still immature. |
+| egui / eframe on Android | Android keyboard/IME support through winit and android-activity is still immature. (Since the soft keyboard is out of scope, this reason is now weaker. The decision stands because Compose is the easiest way to build the connection-manager UI, and handling `KeyEvent`/`MotionEvent` in Kotlin is simple.) |
 | NativeActivity / GameActivity with Rust-drawn UI | NativeActivity has no proper keyboard input. Both require building all UI by hand. |
 | Slint | Its Android support is good, but it's unclear whether wgpu texture import works on its Android renderer. Native UI was preferred. |
 | Iced on Android | The Iced project states mobile support is a non-goal. |
@@ -176,10 +178,175 @@ It has no platform-specific code and no zero-copy problem. It is also what
 the test server sends today. H.264 is an optional later addition behind the
 same pipeline.
 
+## 6. HiDPI
+
+**Short answer: yes.** HiDPI works with wayvnc today, with no protocol
+extension. The client asks for a framebuffer in **physical pixels**, and the
+server's compositor applies the output **scale**. Read from wayvnc `b286ab9`
+(2026-09-23) and Neat VNC `a4c67ec`. Not yet tested live.
+
+### What the server does
+
+- **RFB has no scale factor.** Neither ServerInit nor ExtendedDesktopSize
+  carries a DPI or scale field. The framebuffer is plain pixels.
+- **The client can resize the server.** If the client sends SetDesktopSize
+  (client message 251, from the ExtendedDesktopSize extension), wayvnc calls
+  `handle_client_resize_output` (`main.c`). That sets a custom mode on the
+  output through `wlr-output-management`. Conditions:
+  - Only **headless** outputs are resized. Real monitors are refused
+    (`output-management.c`, `wlr_output_manager_configure_output`). The test
+    server's `HEADLESS-1` is headless.
+  - wayvnc must not run with `--disable-resizing`. The test server doesn't.
+  - Only the first client to resize (the "master layout client") may resize
+    again later.
+  - The layout must name a single screen, using the **screen id** the server
+    sent in its ExtendedDesktopSize rectangle. An unknown id is rejected. So
+    the client must wait for the server's first ExtendedDesktopSize before it
+    sends SetDesktopSize.
+- **wayvnc never sets the output scale.** Its config sets only mode,
+  position and transform. Properties it doesn't set keep their current value,
+  so a scale set once on the compositor survives every client resize.
+- **When capturing a single output, the framebuffer is the capture buffer
+  size**, which means physical pixels. wayvnc sets a logical size only in
+  multi-output "desktop" mode, where Neat VNC then scales the image down.
+  Don't use that mode.
+- **The cursor arrives at buffer scale.** In single-output mode the cursor
+  scale factor cancels out (`wayvnc_process_cursor`), so the cursor image is
+  in the same physical pixels as the framebuffer.
+- **Pointer coordinates are scale-independent.** wayvnc normalises x and y to
+  the framebuffer size before sending `motion_absolute`.
+
+### How lookthrough does HiDPI
+
+1. Measure the view in physical pixels. On desktop, use the window's inner
+   size × scale factor. On Android, `SurfaceView` sizes are already in
+   physical pixels.
+2. Send SetDesktopSize with that size. Round it down to a multiple of the
+   server scale, so the logical size is a whole number. Also round to an even
+   number, for H.264 4:2:0 later.
+3. **Debounce** resizes (about 200–300 ms after the last change). Each
+   request triggers a compositor mode set and an app relayout.
+4. Draw the framebuffer texture 1:1 onto the surface, with nearest
+   sampling, and no scaling when sizes match. Scale only while a resize is in
+   flight, or when the server refuses the resize.
+5. Map pointer positions from logical window coordinates to framebuffer
+   pixels, using the view's scale factor.
+6. Draw the cursor image 1:1 in framebuffer pixels.
+
+**The server-side scale is configured out of band.** For example, run
+`wlr-randr --output HEADLESS-1 --scale 2` in the session startup script.
+The client can't send it through RFB. If it doesn't match the client's
+scale, the remote UI is too large or too small, but it is still sharp.
+Integer scales are safest: XFCE is GTK3, which renders fractional scales at
+the next integer and has the compositor scale the result down.
+
+**Cost.** At scale 2, the pixel count is 4× that of the same logical size.
+For example, 2880×1800 is about 5.2 MP, against 2.1 MP for 1080p. Tight
+bandwidth and decode time grow with it (see §3). This raises the priority of
+adaptive JPEG quality and, later, H.264.
+
+## 7. Threading, async and latency
+
+### Measurement (this workstation, i7-6820HQ, `powersave` governor)
+
+Benchmark: a sender thread writes a 64-byte timestamped message over
+loopback TCP (`TCP_NODELAY`) every 1.5 ms. The receiver records the time from
+send to wake-up. 5000 samples, 2 runs, tokio 1.53, Rust 1.99.
+
+| Receiver | p50 | p90 | p99 |
+|---|---|---|---|
+| Blocking `read` on a dedicated thread | 167–173 µs | 210–217 µs | 257–267 µs |
+| tokio `current_thread`, `block_on` | 183–189 µs | 236–238 µs | 277–287 µs |
+| tokio `multi_thread`, `block_on` | 218–245 µs | 296–314 µs | 585–3343 µs |
+| Blocking `read`, then crossbeam hop to a 2nd thread | 206–235 µs | 289–311 µs | ~3.3 ms |
+| tokio spawned task, then hop to a std thread | 251–259 µs | 324–326 µs | 3.2–3.7 ms |
+
+**Takeaways:**
+- The baseline (about 170 µs) is mostly the CPU waking from idle. It applies
+  to every design.
+- **Every hand-off to a sleeping thread adds about 40–80 µs at the median,
+  and up to milliseconds at p99.** The tail is what users notice.
+- tokio `current_thread` costs about 15 µs more than a blocking read. The
+  multi-thread scheduler costs about 50–70 µs more, and has a worse tail.
+- These costs are small against a 16.7 ms frame, but they add up across
+  every stage of the pipeline. So **the number of thread hops is the thing to
+  minimise**, not the choice of async versus sync as such.
+
+### Larger latency sources that are not about threads
+
+- **Nagle's algorithm.** Set `TCP_NODELAY`. Write each client message with
+  one `write` call, so a key event is never split.
+- **Swapchain queueing.** `PresentMode::Fifo` with the default frame latency
+  can add 1–2 frames (17–33 ms) between upload and display. Use `Mailbox`
+  where supported, otherwise `Fifo` with
+  `desired_maximum_frame_latency = 1`.
+- **Android input batching.** Android batches motion events to vsync by
+  default. `View.requestUnbufferedDispatch()` turns this off for the session
+  view.
+
+### Decision
+
+- **The hot path is synchronous, on dedicated OS threads.** Hot path means
+  network read → parse → decode → apply/upload, plus input → socket write.
+  - **Reader thread:** blocking reads on `TcpStream`. It parses and decodes
+    small rectangles inline. It hands only large, parallelisable work (JPEG
+    tiles, the 4 zlib streams) to decode workers.
+  - **Input writes skip the queue.** The UI thread writes input events
+    straight to the socket through a cloned `TcpStream`, guarded by a mutex.
+    This avoids a hop to a writer thread.
+  - **Channels:** `crossbeam-channel` for hand-offs.
+- **No async runtime in `core` or `render`.** The sans-IO core takes bytes
+  in and gives events out. It doesn't care who calls it.
+- **Async stays on the control plane.** This means connecting, reconnecting,
+  timers, Iced subscriptions and the uniffi API to Kotlin. A small runtime is
+  acceptable there, because none of it is per-frame.
+- **Re-measure** the wake-up cost on the target phone. Big.LITTLE scheduling
+  and deeper idle states may make hops costlier there.
+
+## 8. Android desktop-mode input
+
+The soft keyboard is out of scope. Input comes from a hardware keyboard and
+mouse:
+
+- **Keyboard:** handle `onKeyDown`/`onKeyUp` (or `dispatchKeyEvent`) on the
+  session view.
+  - Send the QEMU extended key event, which carries both a keysym and a
+    scancode. `KeyEvent.getScanCode()` is usually the Linux evdev code on
+    HID keyboards. Android documents it as unreliable, so fall back to
+    keysym-only when it is 0.
+  - Neat VNC turns the QEMU scancode back into evdev (`qnum-to-evdev.c`), so
+    the client converts evdev to qnum.
+  - The keysym comes from `keyCode` plus `getUnicodeChar(metaState)`.
+- **Mouse:**
+  - Pointer position from `ACTION_HOVER_MOVE` and `ACTION_MOVE`.
+  - Buttons from `getButtonState()`.
+  - Wheel from `AXIS_VSCROLL`/`AXIS_HSCROLL`.
+  - Hide the system pointer over the view with `PointerIcon.TYPE_NULL`, and
+    draw the server cursor locally.
+- **System shortcuts:** Android itself may consume some (for example
+  Meta/Home or Alt+Tab in desktop windowing). Which ones reach the app is an
+  open question to test on the device.
+
+## 9. Security scope
+
+**No authentication and no TLS** (decided 2026-10-04). The client offers
+only security type None (1). If the server offers nothing else, it fails
+with a clear error. This is acceptable only on a trusted LAN, or inside a
+tunnel such as WireGuard or SSH. Adding VeNCrypt/TLS later fits after the
+security handshake, because the protocol state machine above it doesn't
+change.
+
 ## Sources
 
 - Neat VNC: https://github.com/any1/neatvnc
-- wayvnc: https://github.com/any1/wayvnc
+- wayvnc: https://github.com/any1/wayvnc (`src/main.c` resize handling,
+  `src/output-management.c`)
+- wlr-output-management protocol:
+  https://wayland.app/protocols/wlr-output-management-unstable-v1
+- Android `View.requestUnbufferedDispatch`:
+  https://developer.android.com/reference/android/view/View#requestUnbufferedDispatch(int)
+- wgpu `SurfaceConfiguration::desired_maximum_frame_latency`:
+  https://docs.rs/wgpu/latest/wgpu/type.SurfaceConfiguration.html
 - wlvncc: https://github.com/any1/wlvncc
 - RFB protocol spec (community): https://github.com/rfbproto/rfbproto
 - TurboVNC H.264 analysis: https://turbovnc.org/About/H264
