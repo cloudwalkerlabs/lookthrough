@@ -10,6 +10,7 @@ use iced::futures::stream::{self, StreamExt};
 use iced::widget::{center, shader, stack, text};
 use iced::{Element, Fill, Subscription, Task};
 use lookthrough_core::session::{self, Session};
+use lookthrough_render::desktop_size;
 
 mod keymap;
 mod view;
@@ -229,30 +230,6 @@ impl App {
     }
 }
 
-/// Rounds a physical view size to what the server should be asked for:
-/// even (for H.264 4:2:0 later), and a multiple of an integer scale factor
-/// so the logical size is whole (`research.md` §6).
-fn desktop_size(physical: (u32, u32), scale: f32) -> (u16, u16) {
-    let s = scale.round();
-    let step = if (scale - s).abs() < 0.01 && s >= 1.0 {
-        lcm(2, s as u32)
-    } else {
-        2
-    };
-    let round = |v: u32| (v.min(u16::MAX.into()) / step * step).max(step) as u16;
-    (round(physical.0), round(physical.1))
-}
-
-fn lcm(a: u32, b: u32) -> u32 {
-    let gcd = |mut a: u32, mut b: u32| {
-        while b != 0 {
-            (a, b) = (b, a % b);
-        }
-        a
-    };
-    a / gcd(a, b) * b
-}
-
 /// The session's notification channel, as subscription data. Hashes by
 /// identity, so the subscription is created once.
 #[derive(Clone)]
@@ -261,18 +238,5 @@ struct Wake(Arc<Mutex<Option<UnboundedReceiver<Notify>>>>);
 impl Hash for Wake {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (Arc::as_ptr(&self.0) as usize).hash(state);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn desktop_size_rounding() {
-        assert_eq!(desktop_size((1281, 801), 1.0), (1280, 800));
-        assert_eq!(desktop_size((2563, 1601), 2.0), (2562, 1600));
-        assert_eq!(desktop_size((1923, 1081), 1.5), (1922, 1080));
-        assert_eq!(desktop_size((3005, 2000), 3.0), (3000, 1998));
     }
 }
