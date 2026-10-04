@@ -97,8 +97,9 @@ impl Session {
     }
 
     /// Ends the session. Blocks until its threads stop; `on_closed` is
-    /// called before this returns.
-    pub fn close(&self) {
+    /// called before this returns. (Not `close`, which Kotlin's
+    /// `AutoCloseable` takes for freeing the object.)
+    pub fn disconnect(&self) {
         CLIENTS.lock().unwrap().remove(&self.id);
         self.client.close();
     }
@@ -119,7 +120,7 @@ pub fn init_logging(filter: String) {
     let filter = tracing_subscriber::EnvFilter::new(filter);
     let registry = tracing_subscriber::registry().with(filter);
     #[cfg(target_os = "android")]
-    let registry = registry.with(paranoid_android::layer("lookthrough"));
+    let registry = registry.with(paranoid_android::layer("lookthrough").with_ansi(false));
     #[cfg(not(target_os = "android"))]
     let registry = registry.with(tracing_subscriber::fmt::layer());
     // Fails if already set, e.g. when the activity is recreated.

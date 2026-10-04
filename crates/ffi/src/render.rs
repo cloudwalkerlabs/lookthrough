@@ -266,6 +266,9 @@ impl Render {
     fn draw(&mut self) {
         self.shared.redraw_started();
         let (Some(gfx), Some(t)) = (&mut self.gfx, &self.target) else {
+            // Nothing to present to (e.g. in the background); don't count
+            // the wait in the present latency.
+            self.shared.applied.lock().unwrap().take();
             return;
         };
         let frame = match t.surface.get_current_texture() {
