@@ -449,6 +449,30 @@ Lossless and q9 give the same crossover.
 (`inline_max_pixels = 2 × 64 × 64`); otherwise fan out. Typing and cursor
 blink are 1–2 tiles, so they stay inline.
 
+## 11. Neat VNC flow control and resize (milestone 2)
+
+Date: 2026-10-05. Read from Neat VNC `server.c` (main branch) and checked
+live.
+
+- **Fence pings gate updates.** After every frame, Neat VNC sends a Fence
+  request (`BlockBefore`) whose payload carries its send time and the
+  frame size. It adds the frame size to `inflight_bytes`, and stops
+  sending while that is above a limit derived from its bandwidth
+  estimate. Only the client's Fence reply lowers it again. **A client
+  that lists Fence must answer every ping**, or updates stall. lookthrough
+  replies from the ordered apply step, after the preceding update is
+  applied, so a slow client slows the server down.
+- **ContinuousUpdates.** Neat VNC sends EndOfContinuousUpdates as soon as
+  SetEncodings lists -313. The region given in EnableContinuousUpdates is
+  fixed, so damage outside it is dropped. Re-send it after a resize. With
+  ContinuousUpdates on, incremental requests are ignored, but a
+  non-incremental request still forces a full frame. Without one, the
+  first full frame never arrives.
+- **SetDesktopSize status 4** is `REQUEST_FORWARDED`, a Neat VNC
+  extension: the layout passed validation and was handed to the
+  compositor. The new size arrives later as an ExtendedDesktopSize with
+  status 0. It is not a refusal.
+
 ## Sources
 
 - Neat VNC: https://github.com/any1/neatvnc

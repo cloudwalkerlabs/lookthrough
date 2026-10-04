@@ -11,27 +11,67 @@ VNC server compatibility is a non-goal.
 
 ## Current state (2026-10-05)
 
-Milestone 1 is done.
+Milestone 1 is done. Milestone 2 is in progress (not committed yet).
 
 - **`crates/core`** (`lookthrough-core`):
   - A sans-IO `Connection` (handshake + message and rect parsing).
   - The Tight decoder: JPEG via zune-jpeg; basic copy and palette via
     flate2/zlib-rs; fill.
   - `pipeline::Pipeline`: inline or worker decode, applied in wire order.
+  - `session::Session` (new): blocking reader thread + `Pipeline`, and a
+    cloneable `Writer` for input from any thread. Protocol housekeeping
+    runs in the ordered apply step:
+    - Fence replies, sent only after the preceding updates are applied.
+    - EnableContinuousUpdates when the server announces it, and again on
+      a resize.
+    - Incremental requests as a fallback without ContinuousUpdates.
+    - QEMU key events and extended mouse buttons once confirmed.
+    - `set_desktop_size` reuses the server's screen id.
+    - Logs update latency percentiles every 5 s.
+  - `client_msg`: added EnableContinuousUpdates, Fence, SetDesktopSize and
+    the extended pointer event. `stats::Samples` for percentiles.
   - Unit tests, plus recorded wayvnc streams in `crates/core/tests/data`.
-- **`crates/headless`** (`lookthrough-headless`), with subcommands:
-  - `connect`: live session, PNG output, `--record`.
-  - `replay --stats`: decode a recorded stream offline.
-  - `bench`: inline vs worker decode latency.
-  - `trim`: cut a recording down to a test fixture.
+- **`crates/render`** (`lookthrough-render`, new; wgpu 27 to match iced
+  0.14):
+  - `Screen`: the framebuffer and cursor textures. The decode sink uploads
+    with `queue.write_texture` from whichever thread applies a rect.
+  - `Renderer`: draws into a caller's render pass. 1:1 with nearest
+    sampling; scales down only when the framebuffer is larger than the
+    view. Texture sRGB-ness follows the target, so pixels pass through
+    unchanged.
+  - `Placement`: the view ↔ framebuffer mapping, shared with pointer
+    input.
+  - `tests/offscreen.rs`: renders and reads back exact pixels (skips
+    without a GPU).
+- **`crates/desktop`** (`lookthrough-desktop`, new): iced 0.14 app,
+  `lookthrough-desktop [addr] [-q N] [--no-resize]`.
+  - A shader widget hosts the renderer. The GPU attaches on first
+    `prepare`; rects that arrived earlier trigger a full refresh.
+  - Input is written to the socket from the UI thread inside
+    `Program::update`.
+  - Keymap: keysyms from the logical key, QEMU scancodes generated from
+    Neat VNC's `qnum-to-evdev.c`.
+  - Wheel maps to buttons 4-7. Held keys and buttons are released when
+    the window loses focus. The system cursor is hidden; the server
+    cursor is drawn locally.
+  - HiDPI: physical view size from the shader viewport. SetDesktopSize is
+    rounded to even and to a multiple of an integer scale. The first
+    request is immediate; later ones are debounced 250 ms.
+  - Logs update applied → frame prepared.
+- **`crates/headless`**: `connect`, `replay --stats`, `bench`, `trim`, and
+  `session` (new: runs `Session` against a live server with a CPU sink).
+- **Live-tested on 2026-10-05** against the local wayvnc: the image renders
+  correctly, ContinuousUpdates and Fence run, and SetDesktopSize resizes
+  HEADLESS-1. The window ran on the headless desktop itself (llvmpipe,
+  self-mirroring), so its latency numbers mean nothing.
 - **Not yet done:**
-  - ZRLE decode. It parses, but is not advertised.
-  - The Tight gradient filter.
-  - Sending ContinuousUpdates, Fence, SetDesktopSize and input. The
-    encoders for key, pointer and QEMU key events exist.
+  - Input tested on a real desktop. It can't be tested here: input would
+    loop back into the client's own window.
+  - Input-to-screen latency on real hardware.
+  - Mailbox present mode (see the open questions).
+  - The Tight short-data check at odd sizes.
+  - ZRLE decode; the Tight gradient filter; clipboard.
   - `headless connect` still decodes on one thread with `TightDecoder`.
-    `Pipeline` is covered by tests and `bench`, and gets wired in with the
-    renderer in milestone 2.
 
 ## Scope decisions (2026-10-04)
 
@@ -215,6 +255,19 @@ Later, put Open H.264 first.
   `on_client_resize`), wlvncc.
 
 ## Open questions
+
+- **Present mode.** iced 0.14 configures its surface with
+  `desired_maximum_frame_latency: 1` and `AutoVsync` (Fifo). It has no
+  "Mailbox if available" setting: `ICED_PRESENT_MODE=mailbox` forces
+  Mailbox and fails where it isn't supported. Decide whether to probe
+  support, or to leave it as an opt-in env var.
+- **Tearing within an update.** Uploads go to the queue as rects are
+  applied, so a frame iced draws mid-update can show half of an update.
+  Fixing it would mean holding uploads until `UpdateEnd`. Check whether
+  it is visible in practice.
+- **Two full frames at connect.** wayvnc sends a second full frame after
+  the first non-incremental request plus EnableContinuousUpdates. The
+  cause is unknown. Without the request, no full frame arrives at all.
 
 - **JPEG decoding speed on the target phone:** `zune-jpeg` vs `turbojpeg`.
 - **wgpu backend on Android:** Vulkan vs GLES, and the minimum Android
