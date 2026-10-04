@@ -2,14 +2,30 @@
 //! 1.0.2 with `lookthrough-headless connect --record`, trimmed with
 //! `lookthrough-headless trim --below 256` to the first frame's top four
 //! tile rows. Both fixtures were recorded seconds apart, of the same screen.
+//!
+//! The recordings show a real desktop, so they aren't in the repository.
+//! Put them in `tests/data/` (ignored by git) to run these tests; without
+//! them each test passes with a note. `lossless_decode_is_stable` pins the
+//! hash of one particular recording; update it after re-recording.
 
 use bytes::BytesMut;
 use lookthrough_core::pipeline::{Options, Output, Pipeline};
 use lookthrough_core::tight::{TightDecoder, TightKind};
 use lookthrough_core::{Connection, Event, PixelFormat, Rect, RectData};
 
-const LOSSLESS: &[u8] = include_bytes!("data/wayvnc-1080x2216-top256-lossless.rfb");
-const JPEG_Q7: &[u8] = include_bytes!("data/wayvnc-1080x2216-top256-jpeg-q7.rfb");
+const LOSSLESS: &str = "wayvnc-1080x2216-top256-lossless.rfb";
+const JPEG_Q7: &str = "wayvnc-1080x2216-top256-jpeg-q7.rfb";
+
+/// The lossless and JPEG fixtures, or `None` when they aren't present.
+fn fixtures() -> Option<(Vec<u8>, Vec<u8>)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let read = |name| std::fs::read(dir.join(name)).ok();
+    let found = read(LOSSLESS).zip(read(JPEG_Q7));
+    if found.is_none() {
+        eprintln!("skipped: recorded streams not found in {}", dir.display());
+    }
+    found
+}
 
 const WIDTH: usize = 1080;
 const ROWS: usize = 256;
@@ -77,7 +93,10 @@ fn rgb(fb: &[u8]) -> impl Iterator<Item = u8> + '_ {
 
 #[test]
 fn parse_is_independent_of_chunking() {
-    for stream in [LOSSLESS, JPEG_Q7] {
+    let Some((lossless, jpeg)) = fixtures() else {
+        return;
+    };
+    for stream in [&lossless[..], &jpeg[..]] {
         let whole = format!("{:?}", events(stream, usize::MAX));
         for chunk in [1, 3, 64, 1500, 65536] {
             assert_eq!(
@@ -91,7 +110,10 @@ fn parse_is_independent_of_chunking() {
 
 #[test]
 fn stream_shape_matches_neat_vnc() {
-    let events = events(LOSSLESS, usize::MAX);
+    let Some((lossless_stream, jpeg_stream)) = fixtures() else {
+        return;
+    };
+    let events = events(&lossless_stream, usize::MAX);
     let Event::ServerInit(init) = &events[0] else {
         panic!()
     };
@@ -119,7 +141,7 @@ fn stream_shape_matches_neat_vnc() {
         assert_eq!(t.resets, 0);
     }
 
-    let events = self::events(JPEG_Q7, usize::MAX);
+    let events = self::events(&jpeg_stream, usize::MAX);
     let jpeg = rects(&events);
     assert_eq!(jpeg.len(), TILES);
     assert!(
@@ -130,15 +152,21 @@ fn stream_shape_matches_neat_vnc() {
 
 #[test]
 fn lossless_decode_is_stable() {
-    let fb = decode(LOSSLESS);
+    let Some((lossless, _)) = fixtures() else {
+        return;
+    };
+    let fb = decode(&lossless);
     assert_eq!(fnv1a(rgb(&fb)), 0x6659_6cf1_1e1f_5f0b);
 }
 
 /// Two independent decoders (zlib copy filter, JPEG) agree on the same screen.
 #[test]
 fn jpeg_matches_lossless() {
-    let exact = decode(LOSSLESS);
-    let jpeg = decode(JPEG_Q7);
+    let Some((lossless, jpeg)) = fixtures() else {
+        return;
+    };
+    let exact = decode(&lossless);
+    let jpeg = decode(&jpeg);
     let diffs: Vec<u8> = rgb(&exact)
         .zip(rgb(&jpeg))
         .map(|(a, b)| a.abs_diff(b))
@@ -153,7 +181,10 @@ fn jpeg_matches_lossless() {
 /// whether rects decode inline or on any number of workers.
 #[test]
 fn pipeline_matches_sequential_decode() {
-    for stream in [LOSSLESS, JPEG_Q7] {
+    let Some((lossless, jpeg)) = fixtures() else {
+        return;
+    };
+    for stream in [&lossless[..], &jpeg[..]] {
         let expected = decode(stream);
         let events = events(stream, usize::MAX);
         let wire_order: Vec<Rect> = rects(&events).iter().map(|r| r.0).collect();

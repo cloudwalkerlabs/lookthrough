@@ -32,7 +32,9 @@ and it runs on the emulator against the local wayvnc.
     - Logs update latency percentiles every 5 s.
   - `client_msg`: added EnableContinuousUpdates, Fence, SetDesktopSize and
     the extended pointer event. `stats::Samples` for percentiles.
-  - Unit tests, plus recorded wayvnc streams in `crates/core/tests/data`.
+  - Unit tests. The tests on recorded wayvnc streams need local fixtures in
+    `crates/core/tests/data` (gitignored, because they show a real desktop);
+    without them, those tests skip.
 - **`crates/render`** (`lookthrough-render`, new; wgpu 27 to match iced
   0.14):
   - `Screen`: the framebuffer and cursor textures. The decode sink uploads

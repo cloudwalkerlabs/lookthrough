@@ -1,1 +1,3 @@
 /target
+# Recorded server streams show a real desktop; keep them local.
+/crates/core/tests/data/
