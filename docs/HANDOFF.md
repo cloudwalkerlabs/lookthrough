@@ -45,8 +45,12 @@ android/      Gradle project: Kotlin + Compose shell, SurfaceView, cargo-ndk
    into it. Never keep an authoritative CPU framebuffer.
 2. **Updates are applied in wire order.** Decoding may happen in parallel,
    but results go through one ordered apply step, keyed by sequence number.
-3. **Network parsing never decodes or renders.** It dispatches work to
-   decoder workers.
+3. **Network parsing never renders, and decodes only small work inline.**
+   - The reader thread may decode small rectangles itself, which avoids a
+     thread hop (`research.md` §7).
+   - Large or parallelisable work (JPEG tiles, the 4 zlib streams) goes to
+     decoder workers.
+   - The size cutoff is chosen by measurement in milestone 1.
 4. **Tight decoding runs in parallel.**
    - The 4 zlib streams each decode in order, but the streams can run in
      parallel with each other.
