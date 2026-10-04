@@ -11,6 +11,8 @@ use anyhow::{Context, Result, bail};
 use bytes::BytesMut;
 use clap::{Parser, Subcommand};
 use lookthrough_core::tight::{TightDecoder, TightKind};
+mod trim;
+
 use lookthrough_core::{Connection, Event, PixelFormat, Rect, RectData, client_msg, encoding};
 
 #[derive(Parser)]
@@ -49,6 +51,17 @@ enum Cmd {
         #[arg(long)]
         stats: bool,
     },
+    /// Cut a recording down to the first frame's top tile rows, keeping the
+    /// server's bytes verbatim, for use as a test fixture.
+    Trim {
+        input: PathBuf,
+        output: PathBuf,
+        /// Keep rects that start above this y (in pixels). Tight basic tiles
+        /// share zlib history in row-major order, so only a prefix of rows
+        /// stays decodable.
+        #[arg(long)]
+        below: u16,
+    },
 }
 
 fn main() -> Result<()> {
@@ -86,6 +99,19 @@ fn main() -> Result<()> {
             let mut client = Client::new(None, None, None);
             client.run(f, None)?;
             client.finish(png.as_deref(), stats)
+        }
+        Cmd::Trim {
+            input,
+            output,
+            below,
+        } => {
+            let data =
+                std::fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
+            let out = trim::trim(&data, below)?;
+            std::fs::write(&output, &out)
+                .with_context(|| format!("writing {}", output.display()))?;
+            tracing::info!(bytes = out.len(), "wrote trimmed stream");
+            Ok(())
         }
     }
 }
