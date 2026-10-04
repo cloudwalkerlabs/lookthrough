@@ -43,6 +43,18 @@ enum Cmd {
         #[arg(long)]
         record: Option<PathBuf>,
     },
+    /// Run a live session (reader thread, decode pipeline, ContinuousUpdates
+    /// and Fence) for a while, logging update latency.
+    Session {
+        #[arg(default_value = "127.0.0.1:5901")]
+        addr: String,
+        #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=9))]
+        quality: Option<u8>,
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+        #[arg(long)]
+        png: Option<PathBuf>,
+    },
     /// Decode a server stream recorded with `connect --record`.
     Replay {
         file: PathBuf,
@@ -112,6 +124,12 @@ fn main() -> Result<()> {
             client.run(stream, record)?;
             client.finish(png.as_deref(), false)
         }
+        Cmd::Session {
+            addr,
+            quality,
+            seconds,
+            png,
+        } => session(&addr, quality, Duration::from_secs(seconds), png.as_deref()),
         Cmd::Replay { file, png, stats } => {
             let f = File::open(&file).with_context(|| format!("opening {}", file.display()))?;
             let mut client = Client::new(None, None, None);
@@ -149,6 +167,69 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn session(
+    addr: &str,
+    quality: Option<u8>,
+    run_for: Duration,
+    png: Option<&std::path::Path>,
+) -> Result<()> {
+    use lookthrough_core::pipeline::Output;
+    use lookthrough_core::session::{self, Session, SessionError};
+    use std::sync::{Arc, Mutex};
+
+    struct Cpu {
+        fb: Mutex<(Framebuffer, u32)>,
+        closed: Mutex<Option<Result<(), String>>>,
+    }
+    impl session::Handler for Cpu {
+        fn output(&self, out: Output) {
+            let mut fb = self.fb.lock().unwrap();
+            match out {
+                Output::Rect { rect, pixels } => fb.0.apply(rect, &pixels),
+                Output::Event(Event::ServerInit(i)) => fb.0.resize(i.width, i.height),
+                Output::Event(
+                    Event::DesktopSize { width, height }
+                    | Event::ExtendedDesktopSize { width, height, .. },
+                ) => fb.0.resize(width, height),
+                Output::Event(Event::UpdateEnd) => fb.1 += 1,
+                Output::Event(Event::CutText { .. }) => {}
+                Output::Event(Event::Cursor { .. }) => tracing::debug!("cursor"),
+                Output::Event(e) => tracing::debug!(?e, "event"),
+                Output::Error(e) => tracing::warn!(%e, "decode error"),
+            }
+        }
+        fn closed(&self, result: Result<(), SessionError>) {
+            *self.closed.lock().unwrap() = Some(result.map_err(|e| e.to_string()));
+        }
+    }
+
+    let cpu = Arc::new(Cpu {
+        fb: Mutex::new((Framebuffer::new(0, 0), 0)),
+        closed: Mutex::new(None),
+    });
+    let opts = session::Options {
+        quality,
+        ..Default::default()
+    };
+    let s = Session::connect(addr, opts, cpu.clone())
+        .with_context(|| format!("connecting to {addr}"))?;
+    let start = Instant::now();
+    while start.elapsed() < run_for && cpu.closed.lock().unwrap().is_none() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(s);
+    if let Some(Err(e)) = cpu.closed.lock().unwrap().take() {
+        bail!("session failed: {e}");
+    }
+    let fb = cpu.fb.lock().unwrap();
+    tracing::info!(updates = fb.1, "session ended");
+    if let Some(path) = png {
+        fb.0.write_png(path)?;
+        tracing::info!(path = %path.display(), "wrote PNG");
+    }
+    Ok(())
 }
 
 struct Client {
