@@ -158,7 +158,7 @@ and **native Android UI (Kotlin + Jetpack Compose)**.
 | Option | Reason |
 |---|---|
 | egui / eframe on Android | Android keyboard/IME support through winit and android-activity is still immature. (Since the soft keyboard is out of scope, this reason is now weaker. The decision stands because Compose is the easiest way to build the connection-manager UI, and handling `KeyEvent`/`MotionEvent` in Kotlin is simple.) |
-| NativeActivity / GameActivity with Rust-drawn UI | NativeActivity has no proper keyboard input. Both require building all UI by hand. |
+| NativeActivity / GameActivity with Rust-drawn UI | NativeActivity has no proper keyboard input. Both require building all UI by hand. Neither gives lower input latency (see §8). |
 | Slint | Its Android support is good, but it's unclear whether wgpu texture import works on its Android renderer. Native UI was preferred. |
 | Iced on Android | The Iced project states mobile support is a non-goal. |
 | Makepad, Dioxus, Tauri | Either a closed renderer or a webview frame path. |
@@ -327,6 +327,62 @@ mouse:
   Meta/Home or Alt+Tab in desktop windowing). Which ones reach the app is an
   open question to test on the device.
 
+### Input path latency: Java vs native
+
+**NativeActivity does not bypass Java.** Read from AOSP `ViewRootImpl.java`
+(main branch, 2026-10-04):
+- The window's input channel is read by the Java `WindowInputEventReceiver`
+  on the UI thread. Events then go through ViewRootImpl's input stages.
+- Only then does `NativePreImeInputStage` (keys) or `NativePostImeInputStage`
+  (everything) call `mInputQueue.sendInputEvent(...)` and return `DEFER`.
+- The native glue thread then reads the `AInputQueue`.
+- So the path is UI thread → Java stages → hop to the native thread →
+  completion callback back to Java. That is the same Java work as a View app,
+  plus a thread hop (about 40–80 µs median, ~3 ms p99, per §7).
+
+**GameActivity** also receives events in Java (`onTouchEvent`/`onKeyDown`)
+and copies them over JNI into a native buffer. The native thread picks them
+up when it next polls, which is usually once per frame in the game-loop
+design.
+
+**Where the Java path actually costs time:**
+- **Motion batching to vsync:** up to 16 ms. Fixed by
+  `requestUnbufferedDispatch`.
+- **A busy main thread:** events queue behind recomposition or layout.
+  During a session the UI around the `SurfaceView` is static, so the main
+  thread is mostly idle.
+- **The JNI call itself:** sub-µs to tens of µs, small next to the ~170 µs
+  wake-up floor.
+
+**Baseline path:** View handler → one JNI call → Rust writes the message to
+the socket on the same thread. This adds no thread hop. A native `write`
+does not go through StrictMode's BlockGuard, so there is no
+`NetworkOnMainThreadException`.
+
+**The real bypass: `AInputReceiver` (API 35).**
+`AInputReceiver_createUnbatchedInputReceiver(ALooper*,
+hostInputTransferToken, ASurfaceControl*, callbacks)`, from
+`android/surface_control_input_receiver.h`, delivers key and motion events,
+unbatched, to a looper on a native thread of our choosing. The Java UI
+thread isn't involved. Caveats:
+- **Minimum API 35.** Probably acceptable, since Android desktop windowing
+  is a 15/16-era feature.
+- **It targets an embedded `ASurfaceControl`.** Rendering would go into a
+  child surface control, not the plain `SurfaceView` surface. The host's
+  `InputTransferToken` comes from Java, via
+  `AttachedSurfaceControl.getInputTransferToken()` and
+  `AInputTransferToken_fromJava`.
+- **Keyboard focus is unverified.** Touch and hover are routed by region,
+  but key events need focus on the embedded surface. The NDK docs only say
+  the token "can be used to request focus". It is unknown whether a hardware
+  keyboard reliably reaches it, and how it interacts with system shortcuts.
+
+**Decision:**
+- Ship the View-based path as the baseline.
+- Spike `AInputReceiver` and compare input-to-socket time against the View
+  path on the target phone.
+- Adopt it only if the gain is measurable and keyboard focus works.
+
 ## 9. Security scope
 
 **No authentication and no TLS** (decided 2026-10-04). The client offers
@@ -345,6 +401,11 @@ change.
   https://wayland.app/protocols/wlr-output-management-unstable-v1
 - Android `View.requestUnbufferedDispatch`:
   https://developer.android.com/reference/android/view/View#requestUnbufferedDispatch(int)
+- AOSP `ViewRootImpl.java` (`NativePreImeInputStage`,
+  `NativePostImeInputStage`):
+  https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/view/ViewRootImpl.java
+- NDK `AInputReceiver` / `AInputTransferToken`:
+  https://developer.android.com/ndk/reference/group/native-activity
 - wgpu `SurfaceConfiguration::desired_maximum_frame_latency`:
   https://docs.rs/wgpu/latest/wgpu/type.SurfaceConfiguration.html
 - wlvncc: https://github.com/any1/wlvncc

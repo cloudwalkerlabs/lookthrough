@@ -67,6 +67,10 @@ android/      Gradle project: Kotlin + Compose shell, SurfaceView, cargo-ndk
    - wgpu `PresentMode::Mailbox` when available, otherwise `Fifo` with
      `desired_maximum_frame_latency = 1`.
    - On Android, call `requestUnbufferedDispatch` on the session view.
+   - Android input handlers call into Rust over JNI, and Rust writes to the
+     socket on that same thread, with no hop. Don't use NativeActivity or
+     GameActivity for latency: both still route input through the Java UI
+     thread, and they add a hop (`research.md` §8).
 9. **HiDPI.**
    - The framebuffer size is the view's physical pixel size.
    - Pointer positions are converted from logical to physical coordinates.
@@ -147,6 +151,11 @@ Later, put Open H.264 first.
    - `requestUnbufferedDispatch`.
    - No soft keyboard and no touch-to-mouse mapping.
    - Recover from surface loss when the app is backgrounded.
+   - **Spike:** native input via `AInputReceiver` (API 35) on a child
+     `SurfaceControl`, which bypasses the Java UI thread.
+     - Measure input-to-socket time against the View path.
+     - Check that hardware-keyboard focus works.
+     - Adopt only on a measurable gain.
 4. **Tuning.** Adapt JPEG quality to measured throughput; profile on a real
    phone.
 5. **(Optional) H.264.**
@@ -188,6 +197,9 @@ Later, put Open H.264 first.
   benchmark on the device.
 - **Android system shortcuts** in desktop mode: find out which key combos
   (Meta, Alt+Tab) reach the app.
+- **`AInputReceiver` keyboard focus:**
+  - Can an embedded `SurfaceControl` reliably get hardware-keyboard focus?
+  - Is the latency gain over the View path worth needing API 35?
 - **Server scale vs client scale.** RFB can't carry the scale. Decide whether
   a mismatch only needs documenting, or whether a helper should set it (for
   example over SSH).
