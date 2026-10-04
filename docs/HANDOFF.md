@@ -29,6 +29,9 @@ Milestone 1 is done.
   - The Tight gradient filter.
   - Sending ContinuousUpdates, Fence, SetDesktopSize and input. The
     encoders for key, pointer and QEMU key events exist.
+  - `headless connect` still decodes on one thread with `TightDecoder`.
+    `Pipeline` is covered by tests and `bench`, and gets wired in with the
+    renderer in milestone 2.
 
 ## Scope decisions (2026-10-04)
 
@@ -154,7 +157,7 @@ Later, put Open H.264 first.
 
 ## Milestones
 
-1. **Core + headless test client.**
+1. **Core + headless test client.** Done 2026-10-05.
    - Connect to the test server; handshake with security type None.
    - Send SetEncodings, then receive and decode Tight with JPEG.
    - Write a frame to a PNG for checking.
@@ -191,7 +194,8 @@ Later, put Open H.264 first.
   - Started by the user systemd unit `vncserver.service`, which runs
     `~/.local/bin/manage_wayvnc.py`. That script launches labwc + XFCE
     headless and `wayvnc --gpu -f 60 0.0.0.0 5901`.
-  - Output: `HEADLESS-1`, 1920×1080.
+  - Output: `HEADLESS-1`. Clients can resize it with SetDesktopSize; on
+    2026-10-05 it was 1080×2216.
 - **Restarting that service ends the user's active desktop session.** Ask
   before restarting it or editing its scripts.
 - **The server currently sends only Tight/ZRLE/Raw.** Its compositor uses
@@ -215,6 +219,12 @@ Later, put Open H.264 first.
 - **JPEG decoding speed on the target phone:** `zune-jpeg` vs `turbojpeg`.
 - **wgpu backend on Android:** Vulkan vs GLES, and the minimum Android
   version to support. Also check whether Mailbox present mode is available.
+- **Tight data under 12 bytes.** The RFB spec sends basic data shorter
+  than 12 bytes uncompressed, with no length; `core` follows the spec.
+  Neat VNC's `tight_encode_tile_basic` appears to always deflate and
+  write a length. That would break on tiles under 4 pixels, such as a
+  corner tile at a framebuffer size of 64k+1. Not verified live. Check it
+  when SetDesktopSize rounding goes in (milestone 2).
 - **Parallel decode after idle.** On the workstation, 4 workers lose their
   speedup on full frames after an idle gap of 5 ms or more
   (`research.md` §10). Find out why, and re-check on the phone.
