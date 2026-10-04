@@ -11,7 +11,9 @@ VNC server compatibility is a non-goal.
 
 ## Current state (2026-10-05)
 
-Milestone 1 is done. Milestone 2 is in progress (not committed yet).
+Milestone 1 is done. Milestone 2 is in progress; only items that need
+real hardware are left. Milestone 3 (Android shell) is started: it builds,
+and it runs on the emulator against the local wayvnc.
 
 - **`crates/core`** (`lookthrough-core`):
   - A sans-IO `Connection` (handshake + message and rect parsing).
@@ -58,6 +60,65 @@ Milestone 1 is done. Milestone 2 is in progress (not committed yet).
     rounded to even and to a multiple of an integer scale. The first
     request is immediate; later ones are debounced 250 ms.
   - Logs update applied → frame prepared.
+- **`crates/ffi`** (`lookthrough-ffi`, new, milestone 3): the Android
+  cdylib.
+  - **uniffi** carries the control API: `Session.connect(address,
+    SessionOptions, SessionListener)`, `id()`, `disconnect()`, and
+    `initLogging`. The listener gets the desktop name and `onClosed`.
+    `disconnect` isn't called `close`, because Kotlin's `AutoCloseable`
+    already uses that name.
+  - **Hand-written JNI** carries the surface and input
+    (`NativeBridge.setSurface/key/pointer/pointerLeft/wheel/releaseAll`),
+    keyed by session id. Input is written to the socket on the Android UI
+    thread, as `research.md` §8 says. JNI is used instead of uniffi here
+    because uniffi goes through JNA, which costs more per call.
+  - **A render thread per session** owns the wgpu instance and device for
+    the session's whole lifetime. `setSurface(null)` drops only the
+    surface, and blocks until that is done, as `surfaceDestroyed`
+    requires. The framebuffer texture survives backgrounding.
+  - **Present mode:** Mailbox if the surface supports it, otherwise Fifo,
+    always with frame latency 1.
+  - **SetDesktopSize** follows the surface size. The rounding
+    (`lookthrough_render::desktop_size`) and the debounce are shared with
+    the desktop app.
+  - **Keymap:** `keyCode` + `getUnicodeChar` → keysym. `getScanCode` (evdev)
+    → qnum, through a table inverted from Neat VNC's `qnum-to-evdev.c`.
+  - Logs go to logcat with the tag `lookthrough`.
+- **`crates/bindgen`**: the `uniffi-bindgen` binary.
+- **`android/`** (new): an AGP 9.3 / Kotlin 2.4 / Compose app,
+  `dev.fanchao.lookthrough`, minSdk 30.
+  - **Build:** Gradle tasks `cargoNdk` (always `--release`) and
+    `uniffiBindgen` produce the jniLibs and Kotlin sources.
+    `-Plookthrough.abis=x86_64` builds a single ABI.
+  - **Connect screen:** address, JPEG quality or lossless, and a resize
+    switch, saved in preferences.
+  - **`SessionView`** is a `SurfaceView` that:
+    - calls `requestUnbufferedDispatch(SOURCE_CLASS_POINTER)`;
+    - hides the pointer with `TYPE_NULL`;
+    - consumes mouse events, so the secondary button isn't turned into
+      Back;
+    - drops key repeats;
+    - releases held keys and buttons when focus is lost.
+  - **Back:** Back from the navigation bar or gesture disconnects. Back
+    from a physical keyboard is sent to the server.
+  - **The ViewModel** keeps the session alive across configuration
+    changes. The activity also declares `configChanges`, so resizing a
+    desktop window doesn't recreate it.
+- **Emulator test on 2026-10-05** (AVD `lookthrough_test`, Pixel 7,
+  API 36.1 x86_64, in `~/.config/.android/avd`, so set
+  `ANDROID_AVD_HOME`). Connected to `10.0.2.2:5901`:
+  - **Image:** correct colours; ContinuousUpdates run; SetDesktopSize
+    resized the server to 1080×2400.
+  - **Lifecycle:** after going to the background and back, the image came
+    back with no full refresh. Back disconnects, and a second session in
+    the same process works.
+  - **Vulkan crashes on the emulator:** gfxstream's driver
+    (`vulkan.ranchu.so`) segfaults in `vkQueueSubmit`. The app therefore
+    sets `WGPU_BACKEND=gl` when `Build.HARDWARE == "ranchu"`.
+  - **Input is not tested.** `adb shell input` can't inject hover events,
+    and clicking would act on the live desktop.
+  - **Latency numbers mean nothing here:** rendering is software
+    (SwiftShader GL).
 - **`crates/headless`**: `connect`, `replay --stats`, `bench`, `trim`, and
   `session` (new: runs `Session` against a live server with a CPU sink).
 - **Live-tested on 2026-10-05** against the local wayvnc: the image renders
@@ -207,7 +268,13 @@ Later, put Open H.264 first.
    - HiDPI: SetDesktopSize to the physical window size, 1:1 drawing,
      debounced resize.
    - Measure decode time per update and latency from input to screen.
-3. **Android shell.**
+3. **Android shell.** Started 2026-10-05; see Current state. Still to do:
+   - A real-device run: Vulkan, Mailbox availability, keyboard and mouse
+     (including which shortcuts reach the app), and input-to-screen
+     latency.
+   - The `AInputReceiver` spike.
+
+   The original scope:
    - Compose UI, `SurfaceView` → Rust wgpu surface.
    - Hardware keyboard via `KeyEvent` → keysym + QEMU scancode (evdev→qnum).
    - Mouse via hover/motion events, buttons, scroll axes. Hide the system
@@ -270,8 +337,12 @@ Later, put Open H.264 first.
   cause is unknown. Without the request, no full frame arrives at all.
 
 - **JPEG decoding speed on the target phone:** `zune-jpeg` vs `turbojpeg`.
-- **wgpu backend on Android:** Vulkan vs GLES, and the minimum Android
-  version to support. Also check whether Mailbox present mode is available.
+- **wgpu backend on Android:**
+  - The default is Vulkan, with GL as a fallback; minSdk is 30.
+  - On the emulator, Vulkan crashes (gfxstream) and GL works.
+  - Still to check on a real phone: whether Vulkan works, and whether
+    Mailbox is offered (the log line "surface configured" shows the
+    present mode).
 - **Tight data under 12 bytes.** The RFB spec sends basic data shorter
   than 12 bytes uncompressed, with no length; `core` follows the spec.
   Neat VNC's `tight_encode_tile_basic` appears to always deflate and
