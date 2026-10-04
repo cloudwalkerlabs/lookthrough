@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use bytes::BytesMut;
 use clap::{Parser, Subcommand};
 use lookthrough_core::tight::{TightDecoder, TightKind};
+mod bench;
 mod trim;
 
 use lookthrough_core::{Connection, Event, PixelFormat, Rect, RectData, client_msg, encoding};
@@ -50,6 +51,23 @@ enum Cmd {
         /// Print per-rect decode time statistics.
         #[arg(long)]
         stats: bool,
+    },
+    /// Measure decode latency inline vs on workers, per update size.
+    Bench {
+        file: PathBuf,
+        #[arg(long, default_value_t = 100)]
+        iterations: usize,
+        #[arg(long, default_value_t = 4)]
+        workers: usize,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "1,2,4,8,16,32,64,128,256,595"
+        )]
+        tiles: Vec<usize>,
+        /// Idle time before each update, so workers park.
+        #[arg(long, default_value_t = 5)]
+        idle_ms: u64,
     },
     /// Cut a recording down to the first frame's top tile rows, keeping the
     /// server's bytes verbatim, for use as a test fixture.
@@ -99,6 +117,23 @@ fn main() -> Result<()> {
             let mut client = Client::new(None, None, None);
             client.run(f, None)?;
             client.finish(png.as_deref(), stats)
+        }
+        Cmd::Bench {
+            file,
+            iterations,
+            workers,
+            tiles,
+            idle_ms,
+        } => {
+            let data =
+                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            bench::bench(
+                &data,
+                &tiles,
+                iterations,
+                workers,
+                Duration::from_millis(idle_ms),
+            )
         }
         Cmd::Trim {
             input,

@@ -4,6 +4,7 @@
 //! tile rows. Both fixtures were recorded seconds apart, of the same screen.
 
 use bytes::BytesMut;
+use lookthrough_core::pipeline::{Options, Output, Pipeline};
 use lookthrough_core::tight::{TightDecoder, TightKind};
 use lookthrough_core::{Connection, Event, PixelFormat, Rect, RectData};
 
@@ -146,4 +147,61 @@ fn jpeg_matches_lossless() {
     let max = *diffs.iter().max().unwrap();
     eprintln!("mean abs diff {mean:.3}, max {max}");
     assert!(mean < 3.0, "mean abs diff {mean}");
+}
+
+/// The pipeline gives the same pixels as sequential decoding, in wire order,
+/// whether rects decode inline or on any number of workers.
+#[test]
+fn pipeline_matches_sequential_decode() {
+    for stream in [LOSSLESS, JPEG_Q7] {
+        let expected = decode(stream);
+        let events = events(stream, usize::MAX);
+        let wire_order: Vec<Rect> = rects(&events).iter().map(|r| r.0).collect();
+        for workers in [1, 2, 4, 8] {
+            for inline_max_pixels in [0, u64::MAX] {
+                let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let sink = {
+                    let out = out.clone();
+                    move |o: Output| out.lock().unwrap().push(o)
+                };
+                let mut p = Pipeline::new(
+                    sink,
+                    Options {
+                        workers,
+                        inline_max_pixels,
+                    },
+                );
+                for e in events.clone() {
+                    p.submit(e);
+                }
+                drop(p); // joins workers
+                let out = std::mem::take(&mut *out.lock().unwrap());
+
+                let mut fb = vec![0u8; WIDTH * ROWS * 4];
+                let mut order = Vec::new();
+                for o in &out {
+                    match o {
+                        Output::Rect { rect, pixels } => {
+                            order.push(*rect);
+                            let row = usize::from(rect.w) * 4;
+                            for (i, src) in pixels.chunks_exact(row).enumerate() {
+                                let off =
+                                    (usize::from(rect.y) + i) * WIDTH * 4 + usize::from(rect.x) * 4;
+                                fb[off..off + row].copy_from_slice(src);
+                            }
+                        }
+                        Output::Error(e) => panic!("{e}"),
+                        Output::Event(_) => {}
+                    }
+                }
+                let ctx = format!("workers {workers}, inline_max_pixels {inline_max_pixels}");
+                assert_eq!(order, wire_order, "{ctx}");
+                assert!(fb == expected, "{ctx}");
+                assert!(
+                    matches!(out.last(), Some(Output::Event(Event::UpdateEnd))),
+                    "{ctx}"
+                );
+            }
+        }
+    }
 }

@@ -5,6 +5,7 @@ pub mod client_msg;
 pub mod connection;
 pub mod encoding;
 pub mod error;
+pub mod pipeline;
 pub mod pixel_format;
 pub mod tight;
 mod wire;
