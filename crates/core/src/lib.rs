@@ -1,5 +1,6 @@
 //! lookthrough core: the RFB protocol state machine and rectangle decoders.
-//! No IO, no UI, no GPU.
+//! No UI, no GPU. [`Connection`] is sans-IO; [`session`] is the thin
+//! blocking-TCP shell around it.
 
 pub mod client_msg;
 pub mod connection;
@@ -7,6 +8,8 @@ pub mod encoding;
 pub mod error;
 pub mod pipeline;
 pub mod pixel_format;
+pub mod session;
+pub mod stats;
 pub mod tight;
 mod wire;
 
