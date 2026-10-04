@@ -392,6 +392,63 @@ tunnel such as WireGuard or SSH. Adding VeNCrypt/TLS later fits after the
 security handshake, because the protocol state machine above it doesn't
 change.
 
+## 10. Inline vs worker decode (milestone 1)
+
+Date: 2026-10-05. Same workstation as §7 (i7-6820HQ, `powersave`), against
+the live wayvnc at 1080×2216. Tools: `lookthrough-headless replay --stats`
+and `lookthrough-headless bench`.
+
+### Decode cost per 64×64 tile, warm CPU, one thread
+
+| Tile | p50 | p90 | p99 |
+|---|---|---|---|
+| Tight basic (zlib, copy filter) | ~12 µs | ~26 µs | 32–48 µs |
+| Tight JPEG, quality 0–7 | ~21 µs | 24–38 µs | 36–65 µs |
+| Tight JPEG, quality 9 (4:4:4) | ~25 µs | ~75 µs | ~120 µs |
+
+A full 1080×2216 frame (595 tiles) takes 10 ms lossless, 15 ms at q7 and
+23 ms at q9 on one thread.
+
+**Neat VNC never sends a rect larger than 64×64**, so a cutoff on rect size
+can't separate cheap work from expensive work. The work an update holds is
+set by its tile count, which the update header gives up front. The cutoff
+is therefore per update, on the total pixel count.
+
+### Update latency, inline vs 4 workers
+
+`bench` submits the first *n* tiles of a recorded frame as one update. It
+measures the time to `UpdateEnd` at the sink, after an idle gap that lets
+the workers park. p50 in µs, JPEG q7:
+
+| Tiles | Idle 0 ms, inline | Idle 0 ms, workers | Idle 5 ms, inline | Idle 5 ms, workers | Idle 16 ms, inline | Idle 16 ms, workers |
+|---|---|---|---|---|---|---|
+| 1 | 56 | 92 | 260 | 383 | – | – |
+| 2 | – | – | 380 | 341 | 421 | 395 |
+| 4 | 212 | 110 | 678 | 395 | 687 | 407 |
+| 16 | 640 | 256 | 2263 | 925 | 2553 | 890 |
+| 64 | 2187 | 882 | 4841 | 2388 | 7941 | 2584 |
+| 595 | 16444 | 4696 | 16554 | 16282 | 20041 | 16865 |
+
+Lossless and q9 give the same crossover.
+
+**Findings:**
+- **One tile:** inline is faster by 35–120 µs, which is the cost of waking
+  a worker (§7).
+- **Two tiles:** about even.
+- **Four tiles and up:** workers are 1.7–3× faster.
+- **CPU clock after idle:** under `powersave`, per-tile cost is 3–4× higher
+  just after an idle gap. A single tile then costs 200–260 µs instead of
+  21 µs.
+- **Full frames after a long idle:** with an idle gap of 5 ms or more,
+  4 workers lose their speedup on full frames (16 ms, the same as inline).
+  With an idle gap of 2 ms or less they reach 3.5× (4.7 ms). The 64-tile
+  updates keep their speedup either way. The cause is unknown; it may be
+  wake-up placement or C-state behaviour. Re-check on the phone.
+
+**Decision:** decode inline when an update holds at most 2 tiles
+(`inline_max_pixels = 2 × 64 × 64`); otherwise fan out. Typing and cursor
+blink are 1–2 tiles, so they stay inline.
+
 ## Sources
 
 - Neat VNC: https://github.com/any1/neatvnc

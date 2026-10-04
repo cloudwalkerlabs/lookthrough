@@ -9,11 +9,26 @@ A low-latency VNC client written in Rust, for desktop (Iced) and Android
 (native Kotlin/Compose UI). The primary server is wayvnc (Neat VNC). General
 VNC server compatibility is a non-goal.
 
-## Current state (2026-10-04)
+## Current state (2026-10-05)
 
-- The repo is an empty Cargo binary crate: `lookthrough`, edition 2024,
-  hello-world `src/main.rs`.
-- No code has been written. Only research is done.
+Milestone 1 is done.
+
+- **`crates/core`** (`lookthrough-core`):
+  - A sans-IO `Connection` (handshake + message and rect parsing).
+  - The Tight decoder: JPEG via zune-jpeg; basic copy and palette via
+    flate2/zlib-rs; fill.
+  - `pipeline::Pipeline`: inline or worker decode, applied in wire order.
+  - Unit tests, plus recorded wayvnc streams in `crates/core/tests/data`.
+- **`crates/headless`** (`lookthrough-headless`), with subcommands:
+  - `connect`: live session, PNG output, `--record`.
+  - `replay --stats`: decode a recorded stream offline.
+  - `bench`: inline vs worker decode latency.
+  - `trim`: cut a recording down to a test fixture.
+- **Not yet done:**
+  - ZRLE decode. It parses, but is not advertised.
+  - The Tight gradient filter.
+  - Sending ContinuousUpdates, Fence, SetDesktopSize and input. The
+    encoders for key, pointer and QEMU key events exist.
 
 ## Scope decisions (2026-10-04)
 
@@ -50,7 +65,9 @@ android/      Gradle project: Kotlin + Compose shell, SurfaceView, cargo-ndk
      thread hop (`research.md` §7).
    - Large or parallelisable work (JPEG tiles, the 4 zlib streams) goes to
      decoder workers.
-   - The size cutoff is chosen by measurement in milestone 1.
+   - The cutoff is per update, not per rect, because Neat VNC rects are
+     never bigger than 64×64. Updates of at most 2 tiles decode inline
+     (`research.md` §10).
 4. **Tight decoding runs in parallel.**
    - The 4 zlib streams each decode in order, but the streams can run in
      parallel with each other.
@@ -198,6 +215,9 @@ Later, put Open H.264 first.
 - **JPEG decoding speed on the target phone:** `zune-jpeg` vs `turbojpeg`.
 - **wgpu backend on Android:** Vulkan vs GLES, and the minimum Android
   version to support. Also check whether Mailbox present mode is available.
+- **Parallel decode after idle.** On the workstation, 4 workers lose their
+  speedup on full frames after an idle gap of 5 ms or more
+  (`research.md` §10). Find out why, and re-check on the phone.
 - **Thread wake-up cost on the target phone.** Repeat the `research.md` §7
   benchmark on the device.
 - **Android system shortcuts** in desktop mode: find out which key combos
