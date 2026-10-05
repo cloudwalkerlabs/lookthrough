@@ -380,6 +380,8 @@ Later, put Open H.264 first.
 - **`AInputReceiver` keyboard focus:**
   - Can an embedded `SurfaceControl` reliably get hardware-keyboard focus?
   - Is the latency gain over the View path worth needing API 35?
-- **Server scale vs client scale.** RFB can't carry the scale. Decide whether
-  a mismatch only needs documenting, or whether a helper should set it (for
-  example over SSH).
+- **Server scale vs client scale.** RFB can't carry the scale. A proposed
+  extension (a DesktopScale pseudo-encoding plus SetDesktopSizeAndScale,
+  applied atomically with the mode) is drafted in `docs/scale-extension.md`.
+  It needs Neat VNC and wayvnc changes. Until it lands, the scale is set out
+  of band.
