@@ -127,10 +127,29 @@ and it runs on the emulator against the local wayvnc.
   correctly, ContinuousUpdates and Fence run, and SetDesktopSize resizes
   HEADLESS-1. The window ran on the headless desktop itself (llvmpipe,
   self-mirroring), so its latency numbers mean nothing.
+- **User-tested on a real desktop (2026-10-05):** works well, including
+  keyboard and mouse input. Back/forward mouse buttons are not tested yet.
+  Logged numbers, in 5 s windows (network path between client and server
+  not recorded):
+  - **Last byte → applied:** p50 0.1–4 ms, p99 0.3–78 ms.
+  - **Update begin → applied:** p50 0.4–1.3 ms, p99 1.6–39 ms.
+  - **Applied → frame prepared:** p50 0.1–8 ms, p99 15–27 ms. This is
+    mostly the wait for vsync under Fifo.
+  - **Input → update applied:** p50 15–175 ms, with many samples near
+    150 ms, and a max of 723 ms.
+  - The client's own share is a few ms. The input number is dominated by
+    the network, the server and the app, but it is also a coarse metric:
+    - The mark is set on a key or button press.
+    - It is cleared by the next update with pixels, whether or not the
+      input caused that update.
+    - So an input that changes nothing on screen counts until some
+      unrelated update arrives (hence the 723 ms).
+  - To tell the parts apart, measure network RTT separately, for example
+    with a Fence round trip after input, and test against a predictable
+    target such as typing into a terminal.
 - **Not yet done:**
-  - Input tested on a real desktop. It can't be tested here: input would
-    loop back into the client's own window.
-  - Input-to-screen latency on real hardware.
+  - Back/forward mouse buttons.
+  - Input latency split into network, server and client (see above).
   - Mailbox present mode (see the open questions).
   - The Tight short-data check at odd sizes.
   - ZRLE decode; the Tight gradient filter; clipboard.
