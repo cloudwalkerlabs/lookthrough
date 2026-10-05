@@ -41,7 +41,7 @@ desktop.** `crates/core/tests/data/` is gitignored for that reason.
     targets. All are installed on this machine.
 - **Emulator:**
   - Start it with
-    `ANDROID_AVD_HOME=~/.config/.android/avd emulator -avd lookthrough_test -no-window -gpu swiftshader_indirect`.
+    `ANDROID_AVD_HOME=~/.config/.android/avd ~/Android/Sdk/emulator/emulator -avd lookthrough_test -no-window -gpu swiftshader_indirect`.
   - From the emulator, the server is `10.0.2.2:5901`.
   - Logs: `adb logcat -s lookthrough`.
   - Connecting with resize on changes the size of the user's
