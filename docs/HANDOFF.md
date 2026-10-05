@@ -11,9 +11,41 @@ VNC server compatibility is a non-goal.
 
 ## Current state (2026-10-05)
 
-Milestone 1 is done. Milestone 2 is in progress; only items that need
-real hardware are left. Milestone 3 (Android shell) is started: it builds,
-and it runs on the emulator against the local wayvnc.
+Milestone 1 is done. Milestone 2 works and was tested by the user on a
+real desktop; a few small items are left (see "Not yet done" below).
+Milestone 3 (Android shell) is started: it builds, and it runs on the
+emulator against the local wayvnc. It hasn't run on a real phone yet.
+
+**Repository:** https://github.com/simophin/lookthrough (public; branch
+`master`). On 2026-10-05 the history was rewritten to remove recorded
+desktop streams. **Never commit recordings or screenshots of the user's
+desktop.** `crates/core/tests/data/` is gitignored for that reason.
+
+## Build and run
+
+- **Desktop:** `cargo run --release -p lookthrough-desktop -- 127.0.0.1:5901 -q 7`.
+  - `-q` is the JPEG quality, 0-9; omit it for lossless.
+  - `--no-resize` keeps the server's size.
+- **Headless:** `cargo run --release -p lookthrough-headless -- --help`
+  (`connect`, `session`, `replay`, `bench`, `trim`).
+- **Tests:** `cargo test --workspace`. The tests on recorded streams skip
+  without the local fixtures, and `render`'s offscreen test skips without
+  a GPU.
+- **Android:**
+  - `cd android && ./gradlew :app:assembleDebug`, or `installDebug` with a
+    device attached. Gradle runs cargo-ndk and uniffi-bindgen itself.
+  - `-Plookthrough.abis=x86_64` builds for the emulator only, which is
+    faster.
+  - Needs the SDK at `~/Android/Sdk` (`android/local.properties`, which
+    is gitignored), NDK 28 or 30, `cargo-ndk`, and the Rust Android
+    targets. All are installed on this machine.
+- **Emulator:**
+  - Start it with
+    `ANDROID_AVD_HOME=~/.config/.android/avd emulator -avd lookthrough_test -no-window -gpu swiftshader_indirect`.
+  - From the emulator, the server is `10.0.2.2:5901`.
+  - Logs: `adb logcat -s lookthrough`.
+  - Connecting with resize on changes the size of the user's
+    `HEADLESS-1` output.
 
 - **`crates/core`** (`lookthrough-core`):
   - A sans-IO `Connection` (handshake + message and rect parsing).
@@ -127,8 +159,8 @@ and it runs on the emulator against the local wayvnc.
   correctly, ContinuousUpdates and Fence run, and SetDesktopSize resizes
   HEADLESS-1. The window ran on the headless desktop itself (llvmpipe,
   self-mirroring), so its latency numbers mean nothing.
-- **User-tested on a real desktop (2026-10-05):** works well, including
-  keyboard and mouse input. Back/forward mouse buttons are not tested yet.
+- **User-tested on a real desktop (2026-10-05), on another machine:**
+  works well, including keyboard and mouse input. Back/forward mouse buttons are not tested yet.
   Logged numbers, in 5 s windows (network path between client and server
   not recorded):
   - **Last byte → applied:** p50 0.1–4 ms, p99 0.3–78 ms.
@@ -160,6 +192,11 @@ and it runs on the emulator against the local wayvnc.
 - **HiDPI is supported.** The client asks the server for a framebuffer in
   physical pixels, using SetDesktopSize, and draws it 1:1. The server's scale
   is set on the compositor, not through RFB. See `research.md` §6.
+- **No scale extension (decided 2026-10-05).** We considered an RFB
+  extension to send the client's scale to the server. That would need
+  either Neat VNC/wayvnc changes, or an RFB proxy in front of wayvnc. The
+  user dropped the idea: the server's scale stays out of band. Don't
+  restart this work unless the user asks.
 - **Android is desktop-mode only.** Hardware keyboard and mouse; no soft
   keyboard and no IME/`InputConnection`. See `research.md` §8.
 - **No authentication and no TLS.** Security type None only. Use on a
@@ -174,8 +211,10 @@ and it runs on the emulator against the local wayvnc.
 crates/
   core/       protocol state machine + Tight/ZRLE/Raw decode, no UI, no GPU
   render/     wgpu renderer: framebuffer texture, tile upload, local cursor
-  ffi/        uniffi bindings + the JNI setSurface entry point (Android)
-  desktop/    Iced app (connection manager + session view)
+  ffi/        Android cdylib: uniffi control API + hand-written JNI for surface and input
+  bindgen/    uniffi-bindgen binary (host only, run by the Android build)
+  desktop/    Iced app (one session per window; address on the command line)
+  headless/   test client: connect, session, replay, bench, trim
 android/      Gradle project: Kotlin + Compose shell, SurfaceView, cargo-ndk
 ```
 
@@ -257,7 +296,8 @@ Later, put Open H.264 first.
   - The binary crates (`desktop`, the headless test client) use `anyhow`.
   - `ffi` maps errors to a uniffi error enum. Don't panic across FFI.
 - **Logging and tracing:** `tracing` + `tracing-subscriber`.
-  - On Android, use `tracing-android` or an `android_logger` bridge.
+  - On Android, `paranoid-android` sends logs to logcat, with the tag
+    `lookthrough`.
   - Put spans on the per-update pipeline stages, so latency can be measured
     from the start.
 - **Threads and channels:** `std::thread` + `crossbeam-channel` on the hot
@@ -267,15 +307,19 @@ Later, put Open H.264 first.
 - **Async (control plane only):**
   - Desktop: whatever Iced's executor provides (tokio feature), for
     subscriptions and connect/reconnect.
-  - Android: uniffi async exports for the Kotlin API.
+  - Android: `Session.connect` is blocking; Kotlin calls it on
+    `Dispatchers.IO`. Listener callbacks arrive on Rust threads and are
+    posted to the main thread.
   - `core` and `render` must not depend on any runtime.
 - **zlib:** `flate2` with the `zlib-rs` backend (pure Rust, cross-compiles to
   Android).
 - **JPEG:** `zune-jpeg` (pure Rust, SIMD). The alternative is `turbojpeg`
   (libjpeg-turbo), which adds CMake/NDK build friction on Android.
 - **Rendering:** `wgpu`.
-- **Android bindings:** `uniffi` + `cargo-ndk`, plus one hand-written JNI
-  function for the surface (see `research.md` §5).
+- **Android bindings:**
+  - `uniffi` 0.32 + `cargo-ndk` carry the control API.
+  - Hand-written JNI (`jni-sys` + `ndk`) carries the surface and input,
+    because JNA calls cost more per call (see `research.md` §5 and §8).
 
 ## Milestones
 
@@ -284,7 +328,8 @@ Later, put Open H.264 first.
    - Send SetEncodings, then receive and decode Tight with JPEG.
    - Write a frame to a PNG for checking.
    - Unit tests on recorded byte streams.
-2. **Render crate + desktop shell (Iced).**
+2. **Render crate + desktop shell (Iced).** Working, and tested by the user
+   on 2026-10-05; see "Not yet done" in Current state.
    - Live view, input, local cursor, ContinuousUpdates/Fence.
    - HiDPI: SetDesktopSize to the physical window size, 1:1 drawing,
      debounced resize.
@@ -380,8 +425,7 @@ Later, put Open H.264 first.
 - **`AInputReceiver` keyboard focus:**
   - Can an embedded `SurfaceControl` reliably get hardware-keyboard focus?
   - Is the latency gain over the View path worth needing API 35?
-- **Server scale vs client scale.** RFB can't carry the scale. A proposed
-  extension (a DesktopScale pseudo-encoding plus SetDesktopSizeAndScale,
-  applied atomically with the mode) is drafted in `docs/scale-extension.md`.
-  It needs Neat VNC and wayvnc changes. Until it lands, the scale is set out
-  of band.
+- **Input latency breakdown.** The user's numbers show input → update p50
+  near 150 ms, but the metric mixes in network, server and app time. Split
+  it (for example, time a Fence round trip after input) before tuning
+  anything on the client.
