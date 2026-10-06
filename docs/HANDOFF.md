@@ -16,7 +16,7 @@ real desktop; a few small items are left (see "Not yet done" below).
 Milestone 3 (Android shell) is started: it builds, and it runs on the
 emulator against the local wayvnc. It hasn't run on a real phone yet.
 
-**Repository:** https://github.com/simophin/lookthrough (public; branch
+**Repository:** https://github.com/cloudwalkerlabs/lookthrough (public; branch
 `master`). On 2026-10-05 the history was rewritten to remove recorded
 desktop streams. **Never commit recordings or screenshots of the user's
 desktop.** `crates/core/tests/data/` is gitignored for that reason.
